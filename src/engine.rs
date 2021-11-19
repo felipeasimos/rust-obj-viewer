@@ -1,6 +1,5 @@
-use wgpu::util::DeviceExt;
 use winit::window::Window;
-use winit::event::{DeviceEvent, ElementState, KeyboardInput, WindowEvent};
+use winit::event::DeviceEvent;
 
 use crate::camera;
 
@@ -40,7 +39,7 @@ impl Engine {
 
         let camera_data = camera::CameraData::new((0.0, 5.0, 10.0), cgmath::Deg(-90.0), cgmath::Deg(-20.0));
         let projection = camera::Projection::new(surface_config.width, surface_config.height, cgmath::Deg(45.0), 0.1, 100.0);
-        let camera_controller = camera::CameraController::new(4.0, 0.4);
+        let camera_controller = camera::CameraController::new(4.0, 0.1);
         let (camera, camera_bind_group_layout) = camera::Camera::new(&device, camera_data, projection, camera_controller);
 
         let render_pipeline = Engine::create_render_pipeline(&device, &surface_config, &camera_bind_group_layout);
@@ -154,7 +153,8 @@ impl Engine {
     }
 
     pub fn update(&mut self, dt: std::time::Duration) {
-        self.camera.update(&self.queue, dt);
+        // update values
+        self.camera.update_data(dt);
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -165,6 +165,7 @@ impl Engine {
             label: Some("Render Encoder")
         });
         {
+            self.camera.update_buffers(&self.device, &mut encoder);
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[wgpu::RenderPassColorAttachment {
@@ -182,7 +183,6 @@ impl Engine {
                 }],
                 depth_stencil_attachment: None,
             });
-
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, self.camera.get_bind_group(), &[]);
             render_pass.draw(0..3, 0..1);

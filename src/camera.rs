@@ -221,8 +221,7 @@ pub struct Camera {
     uniform: CameraUniform,
     buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    mouse_pressed: bool
-        
+    mouse_pressed: bool        
 }
 
 impl Camera {
@@ -320,10 +319,24 @@ impl Camera {
         }
     }
 
-    pub fn update(&mut self, queue: &wgpu::Queue, dt: std::time::Duration) {
+    pub fn update_data(&mut self, dt: std::time::Duration) {
 
         self.controller.update_camera(&mut self.data, dt);
         self.uniform.update_view_proj(&self.data, &self.projection);
-        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&[self.uniform]));
+    }
+
+    pub fn update_buffers(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
+
+        // create staging buffer with new data
+        let staging_buffer = device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Camera Staging Buffer"),
+                contents: bytemuck::cast_slice(&[self.uniform]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_SRC
+            }
+        );
+
+        // copy contents of staging buffer to the actual camera buffer
+        encoder.copy_buffer_to_buffer(&staging_buffer, 0, &self.buffer, 0, std::mem::size_of::<CameraUniform>() as wgpu::BufferAddress);
     }
 }
