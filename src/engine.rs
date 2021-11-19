@@ -23,13 +23,7 @@ pub struct Engine {
     // screen size
     window_size: winit::dpi::PhysicalSize<u32>,
     // camera
-    camera: camera::CameraData,
-    projection: camera::Projection,
-    camera_controller: camera::CameraController,
-    camera_uniform: camera::CameraUniform,
-    camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
-    mouse_pressed: bool
+    camera: camera::Camera,
 }
 
 impl Engine {
@@ -44,48 +38,10 @@ impl Engine {
         let surface_config = Engine::create_surface_config(&adapter, &surface, &window_size);
         surface.configure(&device, &surface_config);
 
-        let camera = camera::CameraData::new((0.0, 5.0, 10.0), cgmath::Deg(-90.0), cgmath::Deg(-20.0));
-        let camera_controller = camera::CameraController::new(0.1, 0.1);
+        let camera_data = camera::CameraData::new((0.0, 5.0, 10.0), cgmath::Deg(-90.0), cgmath::Deg(-20.0));
         let projection = camera::Projection::new(surface_config.width, surface_config.height, cgmath::Deg(45.0), 0.1, 100.0);
         let camera_controller = camera::CameraController::new(4.0, 0.4);
-
-        let mut camera_uniform = camera::CameraUniform::new();
-        camera_uniform.update_view_proj(&camera, &projection);
-
-        let camera_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Camera Buffer"),
-                contents: bytemuck::cast_slice(&[camera_uniform]),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            }
-        );
-
-        let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None
-                    },
-                    count: None
-                }
-            ],
-            label: Some("camera_bind_group_layout")
-        });
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-
-            layout: &camera_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buffer.as_entire_binding()
-                }
-            ],
-            label: Some("camera_bind_group")
-        });
+        let (camera, camera_bind_group_layout) = camera::Camera::new(&device, camera_data, projection, camera_controller);
 
         let render_pipeline = Engine::create_render_pipeline(&device, &surface_config, &camera_bind_group_layout);
         Self {
@@ -98,12 +54,6 @@ impl Engine {
             render_pipeline,
             window_size,
             camera,
-            projection,
-            camera_controller,
-            camera_uniform,
-            camera_buffer,
-            camera_bind_group,
-            mouse_pressed: false
         }
     }
 
@@ -190,7 +140,7 @@ impl Engine {
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        self.projection.resize(new_size.width, new_size.height);
+        self.camera.resize_projection(&new_size);
         if new_size.width > 0 && new_size.height > 0 {
             self.window_size = new_size;
             self.surface_config.width = new_size.width;
@@ -200,39 +150,11 @@ impl Engine {
     }
 
     pub fn input(&mut self, event: &DeviceEvent) -> bool {
-        match event {
-            DeviceEvent::Key(
-                KeyboardInput {
-                    virtual_keycode: Some(key),
-                    state,
-                    ..
-                }
-            ) => self.camera_controller.process_keyboard(*key, *state),
-            DeviceEvent::MouseWheel { delta, .. } => {
-                self.camera_controller.process_scroll(&delta);
-                true
-            }
-            DeviceEvent::Button {
-                button: 1,
-                state,
-            } => {
-                self.mouse_pressed = *state == ElementState::Pressed;
-                true
-            }
-            DeviceEvent::MouseMotion { delta } => {
-                if self.mouse_pressed {
-                    self.camera_controller.process_mouse(delta.0, delta.1);
-                }
-                true
-            }
-            _ => false
-        }
+        self.camera.process_input(event)
     }
 
     pub fn update(&mut self, dt: std::time::Duration) {
-        self.camera_controller.update_camera(&mut self.camera, dt);
-        self.camera_uniform.update_view_proj(&self.camera, &self.projection);
-        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
+        self.camera.update(&self.queue, dt);
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -262,7 +184,7 @@ impl Engine {
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            render_pass.set_bind_group(0, self.camera.get_bind_group(), &[]);
             render_pass.draw(0..3, 0..1);
         }
 

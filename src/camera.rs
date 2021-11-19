@@ -1,5 +1,6 @@
 use cgmath::InnerSpace;
-use winit::event::{ElementState, VirtualKeyCode};
+use wgpu::util::DeviceExt;
+use winit::event::{DeviceEvent, ElementState, KeyboardInput, VirtualKeyCode};
 use std::f32::consts::FRAC_PI_2;
 
 #[rustfmt::skip]
@@ -27,7 +28,7 @@ impl CameraData {
         }
     }
 
-    pub fn calc_matrix(&self) -> cgmath::Matrix4<f32> {
+    fn calc_matrix(&self) -> cgmath::Matrix4<f32> {
         cgmath::Matrix4::look_to_rh(
             self.position,
             cgmath::Vector3::new(
@@ -59,11 +60,11 @@ impl Projection {
         }
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) {
+    fn resize(&mut self, width: u32, height: u32) {
         self.aspect = width as f32 / height as f32;
     }
 
-    pub fn calc_matrix(&self) -> cgmath::Matrix4<f32> {
+    fn calc_matrix(&self) -> cgmath::Matrix4<f32> {
         OPENGL_TO_WGPU_MATRIX * cgmath::perspective(self.fovy, self.aspect, self.znear, self.zfar)
     }
 }
@@ -101,7 +102,7 @@ impl CameraController {
         }
     }
 
-    pub fn process_keyboard(&mut self, key: VirtualKeyCode, state: ElementState) -> bool {
+    fn process_keyboard(&mut self, key: VirtualKeyCode, state: ElementState) -> bool {
 
         let amount = if state == ElementState::Pressed { 1.0 } else { 0.0 };
         match key {
@@ -133,12 +134,12 @@ impl CameraController {
         }
     }
 
-    pub fn process_mouse(&mut self, mouse_dx: f64, mouse_dy: f64) {
+    fn process_mouse(&mut self, mouse_dx: f64, mouse_dy: f64) {
         self.rotate_horizontal = mouse_dx as f32;
         self.rotate_vertical = mouse_dy as f32;
     }
 
-    pub fn process_scroll(&mut self, delta: &winit::event::MouseScrollDelta) {
+    fn process_scroll(&mut self, delta: &winit::event::MouseScrollDelta) {
 
         self.scroll = -match delta {
             winit::event::MouseScrollDelta::LineDelta(_, scroll) => scroll * 100.0,
@@ -151,7 +152,7 @@ impl CameraController {
         };
     }
 
-    pub fn update_camera(&mut self, camera: &mut CameraData, dt: std::time::Duration) {
+    fn update_camera(&mut self, camera: &mut CameraData, dt: std::time::Duration) {
 
         let dt = dt.as_secs_f32();
 
@@ -194,7 +195,7 @@ impl CameraController {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct CameraUniform {
+struct CameraUniform {
 
     // can't use cgmath with bytemuck directly
     view_proj: [[f32; 4]; 4]
@@ -209,5 +210,120 @@ impl CameraUniform {
     }
     pub fn update_view_proj(&mut self, camera: &CameraData, projection: &Projection) {
         self.view_proj = (projection.calc_matrix() * camera.calc_matrix()).into();
+    }
+}
+
+pub struct Camera {
+
+    data: CameraData,
+    projection: Projection,
+    controller: CameraController,
+    uniform: CameraUniform,
+    buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    mouse_pressed: bool
+        
+}
+
+impl Camera {
+
+    pub fn new(device: &wgpu::Device, data: CameraData, projection: Projection, controller: CameraController) -> (Self, wgpu::BindGroupLayout) {
+
+        let mut uniform = CameraUniform::new();
+        uniform.update_view_proj(&data, &projection);
+
+        let buffer = device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Camera Buffer"),
+                contents: bytemuck::cast_slice(&[uniform]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST
+            }
+        );
+
+        let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None
+                    },
+                    count: None
+                }
+            ],
+            label: Some("camera_bind_group_layout")
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+
+            layout: &camera_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding()
+                }
+            ],
+            label: Some("camera_bind_group")
+        });
+
+        (
+            Self {
+                data,
+                projection,
+                controller,
+                uniform,
+                buffer,
+                bind_group,
+                mouse_pressed: false
+            },
+            camera_bind_group_layout
+        )
+
+    }
+
+    pub fn get_bind_group(&self) -> &wgpu::BindGroup {
+        &self.bind_group
+    }
+
+    pub fn resize_projection(&mut self, new_size: &winit::dpi::PhysicalSize<u32>) {
+        self.projection.resize(new_size.width, new_size.height);
+    }
+
+    pub fn process_input(&mut self, event: &DeviceEvent) -> bool {
+        match event {
+            DeviceEvent::Key(
+                KeyboardInput {
+                    virtual_keycode: Some(key),
+                    state,
+                    ..
+                }
+            ) => self.controller.process_keyboard(*key, *state),
+            DeviceEvent::MouseWheel { delta, .. } => {
+                self.controller.process_scroll(&delta);
+                true
+            }
+            DeviceEvent::Button {
+                button: 1,
+                state,
+            } => {
+                self.mouse_pressed = *state == ElementState::Pressed;
+                true
+            }
+            DeviceEvent::MouseMotion { delta } => {
+                if self.mouse_pressed {
+                    self.controller.process_mouse(delta.0, delta.1);
+                }
+                true
+            }
+            _ => false
+        }
+    }
+
+    pub fn update(&mut self, queue: &wgpu::Queue, dt: std::time::Duration) {
+
+        self.controller.update_camera(&mut self.data, dt);
+        self.uniform.update_view_proj(&self.data, &self.projection);
+        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&[self.uniform]));
     }
 }
