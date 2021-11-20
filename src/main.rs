@@ -8,6 +8,8 @@ use winit::event::ElementState;
 
 mod engine;
 mod camera;
+mod model;
+mod instance;
 
 fn main() {
     env_logger::init();
