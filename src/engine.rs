@@ -7,24 +7,9 @@ use winit::event::DeviceEvent;
 
 use crate::camera;
 use crate::model;
-use crate::model::ModelVertex;
-use crate::model::Vertex;
+use crate::model::Model;
+use crate::model::Mesh;
 use crate::instance;
-
-const VERTICES: &[ModelVertex] = &[
-    ModelVertex { position: [-0.0868241, 0.49240386, 0.0] }, // A
-    ModelVertex { position: [-0.49513406, 0.06958647, 0.0] }, // B
-    ModelVertex { position: [-0.21918549, -0.44939706, 0.0] }, // C
-    ModelVertex { position: [0.35966998, -0.3473291, 0.0] }, // D
-    ModelVertex { position: [0.44147372, 0.2347359, 0.0] }, // E
-];
-
-const INDICES: &[u16] = &[
-    0, 1, 4,
-    1, 2, 4,
-    2, 3, 4,
-    /* padding */ 0,
-];
 
 const NUM_INSTANCES_PER_ROW: u32 = 10;
 const NUM_INSTANCES: u32 = NUM_INSTANCES_PER_ROW * NUM_INSTANCES_PER_ROW;
@@ -51,8 +36,7 @@ pub struct Engine {
     // camera
     camera: camera::Camera,
     // model
-    model_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
+    models: Vec<model::SimpleFileModel>,
     instance_buffer: wgpu::Buffer
 }
 
@@ -74,19 +58,11 @@ impl Engine {
         let (camera, camera_bind_group_layout) = camera::Camera::new(&device, camera_data, projection, camera_controller);
 
         let render_pipeline = Engine::create_render_pipeline(&device, &surface_config, &camera_bind_group_layout);
-        let model_buffer = ModelVertex::create_buffer(&device, &VERTICES);
-
-        let index_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Index Buffer"),
-                contents: bytemuck::cast_slice(INDICES),
-                usage: wgpu::BufferUsages::INDEX
-            }
-        );
+        let models = vec![model::SimpleFileModel::new(&device, "teapot.obj").unwrap()];
 
         let instances = (0..NUM_INSTANCES_PER_ROW).flat_map(|z| {
             (0..NUM_INSTANCES_PER_ROW).map(move |x| {
-                let position = cgmath::Vector3 { x: x as f32, y: 0.0, z: z as f32 } - INSTANCE_DISPLACEMENT;
+                let position = cgmath::Vector3 { x: x as f32 * 10.0, y: 0.0, z: z as f32 * 10.0 } - INSTANCE_DISPLACEMENT;
 
                 let rotation = if position.is_zero() {
                     // this is needed so an object at (0, 0, 0) won't get scaled to zero
@@ -119,8 +95,7 @@ impl Engine {
             render_pipeline,
             window_size,
             camera,
-            model_buffer,
-            index_buffer,
+            models,
             instance_buffer
         }
     }
@@ -143,7 +118,7 @@ impl Engine {
     async fn request_device_and_queue(adapter: &wgpu::Adapter) -> (wgpu::Device, wgpu::Queue) {
         adapter.request_device(
             &wgpu::DeviceDescriptor {
-                features: wgpu::Features::empty(),
+                features: wgpu::Features::POLYGON_MODE_LINE,
                 limits: wgpu::Limits::default(),
                 label: Some("Engine Device")
             },
@@ -179,7 +154,7 @@ impl Engine {
                 module: &shader,
                 entry_point: "vs_main",
                 buffers: &[
-                    model::ModelVertex::describe(),
+                    model::SimpleFileModel::describe(),
                     instance::InstanceRaw::describe()
                 ]
             },
@@ -197,7 +172,7 @@ impl Engine {
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
                 cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
+                polygon_mode: wgpu::PolygonMode::Line,
                 clamp_depth: false,
                 conservative: false
             },
@@ -257,10 +232,12 @@ impl Engine {
             });
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, self.camera.get_bind_group(), &[]);
-            render_pass.set_vertex_buffer(0, self.model_buffer.slice(..));
-            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.draw_indexed(0..INDICES.len() as u32, 0, 0..NUM_INSTANCES as u32);
+            for model in &self.models {
+                render_pass.set_vertex_buffer(0, model.get_vertex_buffer().slice(..));
+                render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+                render_pass.set_index_buffer(model.get_index_buffer().slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..model.get_index_buffer_len(), 0, 0..NUM_INSTANCES as u32);
+            }
         }
 
         // submit will accept anything that implements IntoIter
