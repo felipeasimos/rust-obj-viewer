@@ -2,7 +2,7 @@ use std::{fs::File, io::{BufRead, BufReader}};
 
 use wgpu::util::DeviceExt;
 // represents a type of vertex, and thus must be able to describe a buffer layout for it
-pub trait Vertex: Copy + Clone + bytemuck::Pod + bytemuck::Zeroable + FromIterator<f32> {
+pub trait Vertex: Copy + Clone + bytemuck::Pod + bytemuck::Zeroable {
     fn describe<'a>() -> wgpu::VertexBufferLayout<'a>;
 }
 pub trait Mesh {
@@ -44,20 +44,15 @@ impl MeshBufferFactory {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ModelVertex {
-    position: [f32; 3]
+    position: [f32; 3],
+    normal: [f32; 3]
 }
 
-impl FromIterator<f32> for ModelVertex {
-
-    fn from_iter<T: IntoIterator<Item=f32>>(iter: T) -> Self {
-
-        let mut vec : Vec<f32> = Vec::new();
-        for v in iter {
-            vec.push(v)
-        }
-
+impl ModelVertex {
+    fn new(position: [f32; 3], normal: [f32; 3]) -> Self {
         Self {
-            position: [vec[0], vec[1], vec[2]]
+            position,
+            normal
         }
     }
 }
@@ -72,6 +67,11 @@ impl Vertex for ModelVertex {
                 wgpu::VertexAttribute {
                     offset: 0,
                     shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    shader_location: 1,
                     format: wgpu::VertexFormat::Float32x3
                 }
             ]
@@ -112,8 +112,10 @@ impl SimpleFileModel {
 
         let mut reader = BufReader::new(file);
         let mut line = String::new();
-        let mut vertices : Vec<<SimpleFileModel as Mesh>::VertexType>= Vec::new();
+        let mut vertices : Vec<[f32; 3]> = Vec::new();
+        let mut vertex_normals : Vec<[f32; 3]> = Vec::new();
         let mut indices : Vec<u32> = Vec::new();
+        let mut indexed_references : bool = false;
         loop {
 
             match reader.read_line(&mut line) {
@@ -125,9 +127,29 @@ impl SimpleFileModel {
                     match line.remove(0) {
 
                         'v' => {
-                            let verts = line[1..].trim().split(' ').filter_map(|s| s.parse::<f32>().ok());
-                            if verts.clone().count() == 3 {
-                                vertices.push(verts.collect())
+                            match line.remove(0) {
+
+                                'n' => {
+                                    let vert_normal = line.trim().split(' ').filter_map(|s| s.parse::<f32>().ok());
+                                    if vert_normal.clone().count() == 3 {
+                                        let mut final_array : [f32; 3] = [0.0; 3];
+                                        for (i, val) in vert_normal.enumerate() {
+                                            final_array[i] = val;
+                                        }
+                                        vertex_normals.push(final_array);
+                                    }
+                                }
+                                ' ' => {
+                                    let vert = line.trim().split(' ').filter_map(|s| s.parse::<f32>().ok());
+                                    if vert.clone().count() == 3 {
+                                        let mut final_array : [f32; 3] = [0.0; 3];
+                                        for (i, val) in vert.enumerate() {
+                                            final_array[i] = val;
+                                        }
+                                        vertices.push(final_array);
+                                    }
+                                },
+                                _ => ()
                             }
                         },
                         'f' => {
@@ -143,10 +165,25 @@ impl SimpleFileModel {
                 }
                 Err(err) => return Err(err)
             }
-        } 
+        }
+
+        // if indices don't use references to normals or textures
+        let mut final_vertices : Vec<ModelVertex> = Vec::with_capacity(vertices.len());
+        if !indexed_references && vertex_normals.len() > 0 {
+
+            for (vert, normal) in vertices.iter().zip(vertex_normals.iter()) {
+
+                final_vertices.push(ModelVertex::new(*vert, *normal));
+            }
+        } else if vertex_normals.len() == 0 {
+
+            for vert in vertices {
+                final_vertices.push(ModelVertex::new(vert, [0.0, 1.0, 0.0]));
+            }
+        }
 
         Ok(Self {
-            vertex_buffer: MeshBufferFactory::create_vertex_buffer(&vertices[..], &device),
+            vertex_buffer: MeshBufferFactory::create_vertex_buffer(&final_vertices[..], &device),
             index_buffer: MeshBufferFactory::create_index_buffer(&indices[..], &device),
             index_buffer_len: indices.len() as u32
         })

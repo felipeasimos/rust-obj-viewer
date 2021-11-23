@@ -10,6 +10,8 @@ mod engine;
 mod camera;
 mod model;
 mod instance;
+mod light;
+mod texture;
 
 fn main() {
     env_logger::init();

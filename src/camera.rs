@@ -198,17 +198,20 @@ impl CameraController {
 struct CameraUniform {
 
     // can't use cgmath with bytemuck directly
-    view_proj: [[f32; 4]; 4]
+    view_proj: [[f32; 4]; 4],
+    view_position: [f32; 4]
 }
 
 impl CameraUniform {
     pub fn new() -> Self {
         use cgmath::SquareMatrix;
         Self {
+            view_position: [0.0; 4],
             view_proj: cgmath::Matrix4::identity().into(),
         }
     }
     pub fn update_view_proj(&mut self, camera: &CameraData, projection: &Projection) {
+        self.view_position = camera.position.to_homogeneous().into();
         self.view_proj = (projection.calc_matrix() * camera.calc_matrix()).into();
     }
 }
@@ -243,7 +246,7 @@ impl Camera {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -332,7 +335,7 @@ impl Camera {
             &wgpu::util::BufferInitDescriptor {
                 label: Some("Camera Staging Buffer"),
                 contents: bytemuck::cast_slice(&[self.uniform]),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_SRC
+                usage: wgpu::BufferUsages::COPY_SRC
             }
         );
 

@@ -6,10 +6,12 @@ use winit::window::Window;
 use winit::event::DeviceEvent;
 
 use crate::camera;
+use crate::light;
 use crate::model;
 use crate::model::Model;
 use crate::model::Mesh;
 use crate::instance;
+use crate::texture;
 
 const NUM_INSTANCES_PER_ROW: u32 = 10;
 const NUM_INSTANCES: u32 = NUM_INSTANCES_PER_ROW * NUM_INSTANCES_PER_ROW;
@@ -35,9 +37,12 @@ pub struct Engine {
     window_size: winit::dpi::PhysicalSize<u32>,
     // camera
     camera: camera::Camera,
+    // light
+    light: light::Light,
     // model
     models: Vec<model::SimpleFileModel>,
-    instance_buffer: wgpu::Buffer
+    instance_buffer: wgpu::Buffer,
+    depth_texture: texture::Texture
 }
 
 impl Engine {
@@ -54,12 +59,18 @@ impl Engine {
 
         let camera_data = camera::CameraData::new((0.0, 5.0, 10.0), cgmath::Deg(-90.0), cgmath::Deg(-20.0));
         let projection = camera::Projection::new(surface_config.width, surface_config.height, cgmath::Deg(45.0), 0.1, 100.0);
-        let camera_controller = camera::CameraController::new(4.0, 0.1);
+        let camera_controller = camera::CameraController::new(4.0, 0.5);
         let (camera, camera_bind_group_layout) = camera::Camera::new(&device, camera_data, projection, camera_controller);
 
-        let render_pipeline = Engine::create_render_pipeline(&device, &surface_config, &camera_bind_group_layout);
+        let light_data = light::LightData::new((2.0, 2.0, 2.0), (1.0, 1.0, 1.0));
+        let (light, light_bind_group_layout) = light::Light::new(&device, light_data);
+
+        let bind_group_layouts = [&camera_bind_group_layout, &light_bind_group_layout];
+
+        let render_pipeline = Engine::create_render_pipeline(&device, &surface_config, &bind_group_layouts);
         let models = vec![model::SimpleFileModel::new(&device, "teapot.obj").unwrap()];
 
+        let scale = 0.05;
         let instances = (0..NUM_INSTANCES_PER_ROW).flat_map(|z| {
             (0..NUM_INSTANCES_PER_ROW).map(move |x| {
                 let position = cgmath::Vector3 { x: x as f32 * 10.0, y: 0.0, z: z as f32 * 10.0 } - INSTANCE_DISPLACEMENT;
@@ -73,7 +84,7 @@ impl Engine {
                 };
 
                 instance::Instance {
-                    position, rotation,
+                    position, rotation, scaling: cgmath::Vector3::new(scale, scale, scale)
                 }
             })
         }).collect::<Vec<_>>();
@@ -85,6 +96,7 @@ impl Engine {
                 usage: wgpu::BufferUsages::VERTEX,
             }
         );
+        let depth_texture = texture::Texture::create_depth_texture(&device, &surface_config, "depth_texture");
         Self {
             instance,
             adapter,
@@ -95,8 +107,10 @@ impl Engine {
             render_pipeline,
             window_size,
             camera,
+            light,
             models,
-            instance_buffer
+            instance_buffer,
+            depth_texture
         }
     }
 
@@ -134,7 +148,7 @@ impl Engine {
             present_mode: wgpu::PresentMode::Fifo
         }
     }
-    fn create_render_pipeline(device: &wgpu::Device, surface_config: &wgpu::SurfaceConfiguration, camera_bind_group_layout: &wgpu::BindGroupLayout) -> wgpu::RenderPipeline {
+    fn create_render_pipeline(device: &wgpu::Device, surface_config: &wgpu::SurfaceConfiguration, bind_group_layouts: &[&wgpu::BindGroupLayout]) -> wgpu::RenderPipeline {
 
         let shader = device.create_shader_module(&wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
@@ -142,9 +156,7 @@ impl Engine {
         });
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[
-                camera_bind_group_layout
-            ],
+            bind_group_layouts,
             push_constant_ranges: &[]
         });
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -171,12 +183,18 @@ impl Engine {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Line,
+                cull_mode: Some(wgpu::Face::Front),
+                polygon_mode: wgpu::PolygonMode::Fill,
                 clamp_depth: false,
                 conservative: false
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: texture::Texture::DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default()
+            }),
             multisample: wgpu::MultisampleState {
                 count: 1,
                 mask: !0,
@@ -193,6 +211,7 @@ impl Engine {
             self.surface_config.height = new_size.height;
             self.surface.configure(&self.device, &self.surface_config);
         }
+        self.depth_texture = texture::Texture::create_depth_texture(&self.device, &self.surface_config, "depth_texture");
     }
 
     pub fn input(&mut self, event: &DeviceEvent) -> bool {
@@ -213,6 +232,7 @@ impl Engine {
         });
         {
             self.camera.update_buffers(&self.device, &mut encoder);
+            self.light.update_buffers(&self.device, &mut encoder);
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[wgpu::RenderPassColorAttachment {
@@ -228,10 +248,19 @@ impl Engine {
                         store: true,
                     },
                 }],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_texture.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: true
+                    }),
+                    stencil_ops: None
+                }),
             });
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, self.camera.get_bind_group(), &[]);
+            render_pass.set_bind_group(1, self.light.get_bind_group(), &[]);
+
             for model in &self.models {
                 render_pass.set_vertex_buffer(0, model.get_vertex_buffer().slice(..));
                 render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
